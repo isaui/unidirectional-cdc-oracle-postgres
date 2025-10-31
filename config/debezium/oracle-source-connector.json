@@ -1,0 +1,43 @@
+{
+  "name": "oracle-cdc-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.oracle.OracleConnector",
+    "tasks.max": "1",
+    
+    "database.hostname": "oracle",
+    "database.port": "1521",
+    "database.user": "c##dbzuser",
+    "database.password": "${ORACLE_CDC_PASSWORD}",
+    "database.dbname": "${ORACLE_DATABASE}",
+    "database.pdb.name": "${ORACLE_DATABASE}",
+    "database.oracle.version": "21",
+    "database.server.name": "oracle",
+    
+    "topic.prefix": "db.oracle",
+    "table.include.list": "${ORACLE_APP_USER}.USERS,${ORACLE_APP_USER}.USER_ACTIVITIES",
+    
+    "schema.history.internal.kafka.bootstrap.servers": "kafka-broker-1:9093",
+    "schema.history.internal.kafka.topic": "schema-changes.oracle",
+    "schema.history.internal.producer.sasl.mechanism": "SCRAM-SHA-256",
+    "schema.history.internal.producer.security.protocol": "SASL_PLAINTEXT",
+    "schema.history.internal.producer.sasl.jaas.config": "org.apache.kafka.common.security.scram.ScramLoginModule required username=debezium password=\"${DEBEZIUM_PASSWORD}\";",
+    "schema.history.internal.consumer.sasl.mechanism": "SCRAM-SHA-256",
+    "schema.history.internal.consumer.security.protocol": "SASL_PLAINTEXT",
+    "schema.history.internal.consumer.sasl.jaas.config": "org.apache.kafka.common.security.scram.ScramLoginModule required username=debezium password=\"${DEBEZIUM_PASSWORD}\";",
+    
+    "log.mining.strategy": "online_catalog",
+    "log.mining.continuous.mine": "false",
+    
+    "tombstones.on.delete": "true",
+    "decimal.handling.mode": "double",
+    "time.precision.mode": "adaptive",
+    
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "true",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "true",
+    
+    "heartbeat.interval.ms": "10000",
+    "heartbeat.topics.prefix": "__debezium-heartbeat"
+  }
+}

@@ -1,0 +1,8 @@
+FROM quay.io/debezium/connect:2.5
+
+# Download Oracle JDBC driver (ojdbc11) from Maven Central
+USER root
+RUN cd /kafka/libs && \
+    curl -O https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc11/23.2.0.0/ojdbc11-23.2.0.0.jar
+
+USER kafka

@@ -1,0 +1,43 @@
+{
+  "name": "oracle-sink-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
+    "tasks.max": "1",
+    
+    "connection.url": "jdbc:oracle:thin:@oracle:1521/${ORACLE_DATABASE}",
+    "connection.username": "${ORACLE_APP_USER}",
+    "connection.password": "${ORACLE_APP_PASSWORD}",
+    
+    "hibernate.connection.url": "jdbc:oracle:thin:@oracle:1521/${ORACLE_DATABASE}",
+    "hibernate.connection.username": "${ORACLE_APP_USER}",
+    "hibernate.connection.password": "${ORACLE_APP_PASSWORD}",
+    "hibernate.dialect": "org.hibernate.dialect.Oracle12cDialect",
+    
+    "topics": "db.postgres.public.users,db.postgres.public.user_activities",
+    
+    "schema.evolution": "none",
+    "primary.key.mode": "record_key",
+    
+    "insert.mode": "upsert",
+    "delete.enabled": "true",
+    
+    "table.name.format": "${topic}",
+    
+    "transforms": "route",
+    "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
+    "transforms.route.regex": "db\\.postgres\\.public\\.(.*)",
+    "transforms.route.replacement": "$1",
+    
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "true",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "true",
+    
+    "errors.tolerance": "all",
+    "errors.log.enable": "true",
+    "errors.log.include.messages": "true",
+    "errors.deadletterqueue.topic.name": "dlq-oracle-sink",
+    "errors.deadletterqueue.topic.replication.factor": "1",
+    "errors.deadletterqueue.context.headers.enable": "true"
+  }
+}

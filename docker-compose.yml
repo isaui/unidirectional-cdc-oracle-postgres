@@ -1,0 +1,422 @@
+version: '3.8'
+
+services:
+  # ============================================================
+  # KRaft Storage Init - Format broker with SCRAM debezium user
+  # ============================================================
+  kafka-format-init:
+    image: confluentinc/cp-kafka:8.1.0
+    container_name: kafka-format-init
+    env_file:
+      - .env
+    volumes:
+      - ./docker-vol/broker-1-data:/var/lib/kafka/data
+      - ./scripts/format-kafka.sh:/tmp/format-kafka.sh:ro
+    environment:
+      CLUSTER_ID: '${CLUSTER_ID}'
+    command: bash /tmp/format-kafka.sh
+    networks:
+      - debezium-network
+
+  # ============================================================
+  # Kafka Broker (KRaft Mode - Single Node)
+  # SASL_PLAINTEXT with SCRAM-SHA-256 (NO TLS for simplicity)
+  # ============================================================
+  kafka-broker-1:
+    image: confluentinc/cp-kafka:8.1.0
+    container_name: kafka-broker-1
+    depends_on:
+      kafka-format-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    ports:
+      - "9093:9093"   # SASL_PLAINTEXT client access from host
+    environment:
+      # KRaft Configuration
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka-broker-1:19093'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      CLUSTER_ID: '${CLUSTER_ID}'
+      
+      # Listeners Configuration (SASL_PLAINTEXT only, NO SSL)
+      # SASL_PLAINTEXT: For Debezium with SASL PLAIN auth
+      # CONTROLLER: Internal KRaft controller
+      KAFKA_LISTENERS: 'SASL_PLAINTEXT://0.0.0.0:9093,CONTROLLER://kafka-broker-1:19093'
+      KAFKA_ADVERTISED_LISTENERS: 'SASL_PLAINTEXT://kafka-broker-1:9093'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'SASL_PLAINTEXT:SASL_PLAINTEXT,CONTROLLER:SASL_PLAINTEXT'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'SASL_PLAINTEXT'
+      
+      # SASL Configuration (SCRAM-SHA-256 for client, PLAIN for controller)
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-256,PLAIN
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: SCRAM-SHA-256
+      KAFKA_SASL_MECHANISM_CONTROLLER_PROTOCOL: PLAIN
+      KAFKA_OPTS: -Djava.security.auth.login.config=/tmp/kafka_jaas.conf
+      
+      # CONTROLLER: SASL_PLAINTEXT with PLAIN (KRaft limitation)
+      KAFKA_LISTENER_NAME_CONTROLLER_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="${KAFKA_ADMIN_PASS}" user_admin="${KAFKA_ADMIN_PASS}";'
+      
+      # SASL_PLAINTEXT: SCRAM-SHA-256 authentication for clients (Debezium)
+      # SCRAM users created during format-kafka.sh
+      KAFKA_LISTENER_NAME_SASL_PLAINTEXT_SCRAM_SHA_256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASS}";'
+      
+      # ACL/Authorization Configuration
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      KAFKA_SUPER_USERS: User:admin
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: false
+      
+      # Topic Defaults (Single node - RF 1)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      
+      # Log directories
+      KAFKA_LOG_DIRS: '/var/lib/kafka/data'
+    volumes:
+      - ./docker-vol/broker-1-data:/var/lib/kafka/data
+      - ./config/kafka_jaas.conf:/etc/kafka/kafka_jaas_template.conf:ro
+    command: >
+      bash -c "
+      sed 's/__KAFKA_ADMIN_PASS__/'\"$$KAFKA_ADMIN_PASS\"'/g; s/__DEBEZIUM_PASSWORD__/'\"$$DEBEZIUM_PASSWORD\"'/g' /etc/kafka/kafka_jaas_template.conf > /tmp/kafka_jaas.conf &&
+      /etc/confluent/docker/run
+      "
+    networks:
+      - debezium-network
+
+  # ============================================================
+  # Kafka ACL Setup (Debezium permissions only)
+  # ============================================================
+  kafka-acl-setup:
+    image: confluentinc/cp-kafka:8.1.0
+    container_name: kafka-acl-setup
+    depends_on:
+      kafka-broker-1:
+        condition: service_started
+    env_file:
+      - .env
+    volumes:
+      - ./scripts/setup-acls.sh:/setup-acls.sh:ro
+    command: bash /setup-acls.sh
+    networks:
+      - debezium-network
+    restart: "no"
+
+  # ============================================================
+  # Kafka UI (Web Dashboard)
+  # ============================================================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      kafka-broker-1:
+        condition: service_started
+      kafka-acl-setup:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      # Web Authentication (Login Form)
+      AUTH_TYPE: "LOGIN_FORM"
+      SPRING_SECURITY_USER_NAME: ${KAFKA_UI_USERNAME}
+      SPRING_SECURITY_USER_PASSWORD: ${KAFKA_UI_PASSWORD}
+      
+      # Kafka Cluster Connection (KRaft Mode - No ZooKeeper needed)
+      KAFKA_CLUSTERS_0_NAME: debezium-cdc-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-broker-1:9093
+      
+      # SASL_PLAINTEXT with SCRAM-SHA-256 (no TLS)
+      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      KAFKA_CLUSTERS_0_PROPERTIES_SASL_MECHANISM: SCRAM-SHA-256
+      KAFKA_CLUSTERS_0_PROPERTIES_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="${KAFKA_ADMIN_PASS}";'
+    networks:
+      - debezium-network
+
+  # ============================================================
+  # PostgreSQL Database (Source for CDC)
+  # ============================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    command: >
+      postgres
+      -c wal_level=logical
+      -c max_wal_senders=4
+      -c max_replication_slots=4
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./config/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - debezium-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # Debezium Connect (PostgreSQL CDC)
+  # ============================================================
+  debezium-connect:
+    build:
+      context: .
+      dockerfile: Dockerfile.debezium
+    image: debezium-connect-oracle:2.5
+    container_name: debezium-connect
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-broker-1:
+        condition: service_started
+      kafka-acl-setup:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    ports:
+      - "8083:8083"
+    environment:
+      # Kafka Connection (SASL_PLAINTEXT)
+      BOOTSTRAP_SERVERS: kafka-broker-1:9093
+      GROUP_ID: debezium-postgres-group
+      CONFIG_STORAGE_TOPIC: debezium_connect_configs
+      OFFSET_STORAGE_TOPIC: debezium_connect_offsets
+      STATUS_STORAGE_TOPIC: debezium_connect_statuses
+      
+      # Kafka security (SASL_PLAINTEXT with SCRAM-SHA-256)
+      CONNECT_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      CONNECT_SASL_MECHANISM: SCRAM-SHA-256
+      CONNECT_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="debezium" password="${DEBEZIUM_PASSWORD}";'
+      
+      # Producer security
+      CONNECT_PRODUCER_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      CONNECT_PRODUCER_SASL_MECHANISM: SCRAM-SHA-256
+      CONNECT_PRODUCER_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="debezium" password="${DEBEZIUM_PASSWORD}";'
+      
+      # Consumer security
+      CONNECT_CONSUMER_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      CONNECT_CONSUMER_SASL_MECHANISM: SCRAM-SHA-256
+      CONNECT_CONSUMER_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required username="debezium" password="${DEBEZIUM_PASSWORD}";'
+      
+      # Key and value converters
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      
+      # Basic config
+      CONNECT_REST_ADVERTISED_HOST_NAME: debezium-connect
+      CONNECT_PLUGIN_PATH: /kafka/connect
+    networks:
+      - debezium-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ============================================================
+  # Debezium Connector Setup (PostgreSQL)
+  # ============================================================
+  debezium-postgres-setup:
+    image: curlimages/curl:latest
+    container_name: debezium-postgres-setup
+    depends_on:
+      debezium-connect:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./config/debezium:/config:ro
+      - ./scripts/setup-debezium-postgres.sh:/setup.sh:ro
+    command: sh /setup.sh
+    networks:
+      - debezium-network
+    restart: "no"
+
+  # ============================================================
+  # Debezium Connector Setup (Oracle Sink)
+  # ============================================================
+  debezium-oracle-sink-setup:
+    image: curlimages/curl:latest
+    container_name: debezium-oracle-sink-setup
+    depends_on:
+      debezium-connect:
+        condition: service_healthy
+      debezium-postgres-setup:
+        condition: service_completed_successfully
+      oracle:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./config/debezium:/config:ro
+      - ./scripts/setup-debezium-oracle-sink.sh:/setup.sh:ro
+    command: sh /setup.sh
+    networks:
+      - debezium-network
+    restart: "no"
+
+  # ============================================================
+  # Debezium Connector Setup (Oracle Source)
+  # ============================================================
+  debezium-oracle-source-setup:
+    image: curlimages/curl:latest
+    container_name: debezium-oracle-source-setup
+    depends_on:
+      debezium-connect:
+        condition: service_healthy
+      debezium-oracle-sink-setup:
+        condition: service_completed_successfully
+      oracle:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./config/debezium:/config:ro
+      - ./scripts/setup-debezium-oracle-source.sh:/setup.sh:ro
+    command: sh /setup.sh
+    networks:
+      - debezium-network
+    restart: "no"
+
+  # ============================================================
+  # Debezium Connector Setup (PostgreSQL Sink)
+  # ============================================================
+  debezium-postgres-sink-setup:
+    image: curlimages/curl:latest
+    container_name: debezium-postgres-sink-setup
+    depends_on:
+      debezium-connect:
+        condition: service_healthy
+      debezium-oracle-source-setup:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./config/debezium:/config:ro
+      - ./scripts/setup-debezium-postgres-sink.sh:/setup.sh:ro
+    command: sh /setup.sh
+    networks:
+      - debezium-network
+    restart: "no"
+
+  
+
+  # ============================================================
+  # Oracle Init Script Generator (runs before Oracle starts)
+  # ============================================================
+  oracle-init:
+    image: alpine:latest
+    container_name: oracle-init
+    env_file:
+      - .env
+    volumes:
+      - ./config/oracle/init.sql:/input/init-template.sql:ro
+      - oracle-init-scripts:/output
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "Generating Oracle init script..."
+        sed "s/\$${ORACLE_DATABASE}/$$ORACLE_DATABASE/g; s/\$${ORACLE_APP_USER}/$$ORACLE_APP_USER/g; s/\$${ORACLE_CDC_PASSWORD}/$$ORACLE_CDC_PASSWORD/g" /input/init-template.sql > /output/01-init.sql
+        echo "✅ Generated /output/01-init.sql"
+        echo "First 10 lines:"
+        head -n 10 /output/01-init.sql
+    networks:
+      - debezium-network
+
+  # ============================================================
+  # Oracle Database (Source for CDC)
+  # ============================================================
+  oracle:
+    image: gvenzl/oracle-xe:21-slim
+    container_name: oracle
+    depends_on:
+      oracle-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD}
+      ORACLE_DATABASE: ${ORACLE_DATABASE}
+      APP_USER: ${ORACLE_APP_USER}
+      APP_USER_PASSWORD: ${ORACLE_APP_PASSWORD}
+      ORACLE_CDC_PASSWORD: ${ORACLE_CDC_PASSWORD}
+    ports:
+      - "1521:1521"
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+      - oracle-init-scripts:/container-entrypoint-initdb.d:ro
+      - ./config/oracle/startup:/container-entrypoint-startdb.d:ro
+    networks:
+      - debezium-network
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    shm_size: 1g
+
+  # ============================================================
+  # Data Producer (Unified - reads CDC_MODE from env)
+  # ============================================================
+  # Run: docker-compose up -d producer
+  # Note: Producer automatically detects CDC_MODE and writes to appropriate DB
+  producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.producer
+    container_name: cdc-producer
+    env_file:
+      - .env
+    environment:
+      CDC_MODE: ${CDC_MODE}
+      # PostgreSQL config (used when CDC_MODE=POSTGRES)
+      DB_HOST: postgres
+      DB_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Oracle config (used when CDC_MODE=ORACLE)
+      ORACLE_HOST: oracle
+      ORACLE_PORT: 1521
+      ORACLE_DATABASE: ${ORACLE_DATABASE}
+      ORACLE_APP_USER: ${ORACLE_APP_USER}
+      ORACLE_APP_PASSWORD: ${ORACLE_APP_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      oracle:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/app/scripts:ro
+    command: python /app/scripts/producer.py --interval 3
+    networks:
+      - debezium-network
+    restart: unless-stopped
+
+networks:
+  debezium-network:
+    driver: bridge
+
+volumes:
+  kafka-data:
+  postgres-data:
+  oracle-data:
+  oracle-init-scripts:
