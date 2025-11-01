@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- ============================================================
 CREATE TABLE IF NOT EXISTS user_activities (
     id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
     activity_type VARCHAR(50) NOT NULL,
     description TEXT,
     ip_address VARCHAR(45),

@@ -21,7 +21,7 @@
     "insert.mode": "upsert",
     "delete.enabled": "true",
     
-    "table.name.format": "${topic}",
+    "collection.name.format": "${topic}",
     
     "transforms": "route",
     "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
